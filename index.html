@@ -2,20 +2,22 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Store Splitter</title>
+  <title>Store CSV Splitter</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
-    body { font-family: system-ui, Arial, sans-serif; margin: 24px; max-width: 860px }
+    body { font-family: system-ui, Arial, sans-serif; margin: 24px; max-width: 980px }
     .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 4px 16px rgba(0,0,0,.04) }
-    h1 { margin: 0 0 8px }
+    h1 { margin: 0 0 12px }
     label { display: block; font-weight: 600; margin-top: 12px }
-    input[type="file"] { margin-top: 8px }
+    input[type="file"] { margin-top: 6px }
     button { margin-top: 16px; padding: 10px 16px; border: 0; border-radius: 10px; cursor: pointer }
     .primary { background:#16a34a; color:white }
     .muted { color:#64748b; font-size: 12px }
-    .row { display:flex; gap:16px; align-items:center; flex-wrap:wrap }
+    .row { display:flex; gap:16px; align-items:flex-end; flex-wrap:wrap }
+    select, input[type="text"] { padding: 8px; border:1px solid #d1d5db; border-radius:8px; min-width: 220px }
+    code { background: #f3f4f6; padding: 2px 6px; border-radius: 6px }
   </style>
-  <!-- Libraries: CSV parser, Excel reader, ZIP builder, file saver -->
+  <!-- libs -->
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
@@ -23,25 +25,35 @@
 </head>
 <body>
   <h1>Store CSV Splitter</h1>
+
   <div class="card">
     <div class="row">
-      <div style="flex:1 1 320px">
+      <div style="flex:1 1 360px">
         <label>Master CSV</label>
         <input id="master" type="file" accept=".csv" />
-        <div class="muted">Must include a header column like <code>Store_No</code>.</div>
+        <div class="muted">Must include a store column (default <code>Store_No</code>).</div>
+        <label style="margin-top:10px">Store column name in master CSV</label>
+        <input id="storeCol" type="text" value="Store_No" />
       </div>
-      <div style="flex:1 1 320px">
+
+      <div style="flex:1 1 360px">
         <label>Optional mapping (Excel/CSV) for renaming to Careem ID</label>
         <input id="mapping" type="file" accept=".xlsx,.xls,.csv" />
-        <div class="muted">We’ll auto-detect columns (Store Code & Careem ID).</div>
+        <div class="row" style="margin-top:8px">
+          <div>
+            <label>Store code column (in mapping)</label>
+            <select id="mapStoreCol"></select>
+          </div>
+          <div>
+            <label>Careem ID column (in mapping)</label>
+            <select id="mapIdCol"></select>
+          </div>
+        </div>
+        <div id="mapPreview" class="muted" style="margin-top:6px"></div>
       </div>
     </div>
 
-    <div class="row">
-      <div>
-        <label>Store column name</label>
-        <input id="storeCol" type="text" value="Store_No" />
-      </div>
+    <div class="row" style="margin-top:8px">
       <div>
         <label>Output filename pattern</label>
         <select id="pattern">
@@ -56,10 +68,11 @@
   </div>
 
 <script>
-const $ = (id)=>document.getElementById(id);
-const log = (msg)=>{ $('log').textContent = msg };
+const $ = id => document.getElementById(id);
+const log = msg => { $('log').textContent = msg };
 
-async function readFileAsText(file){
+// ---- helpers
+function readFileAsText(file){
   return new Promise((res, rej)=>{
     const r = new FileReader();
     r.onload = () => res(r.result);
@@ -67,28 +80,6 @@ async function readFileAsText(file){
     r.readAsText(file);
   });
 }
-
-parseMapping
-
-function guessStoreCodeCol(headers, rows){
-  let best=null, score=-1;
-  headers.forEach(h=>{
-    const s = rows.reduce((acc,r)=>acc + ( /^[A-Z]\d{3}$/.test(String(r[h]||"").trim().toUpperCase()) ? 1:0 ), 0);
-    if(s>score){score=s;best=h;}
-  });
-  return best || headers[0];
-}
-
-function guessIdCol(headers, rows, exclude){
-  let best=null, score=-1;
-  headers.forEach(h=>{
-    if(h===exclude) return;
-    const s = rows.reduce((acc,r)=>acc + ( /^\d+$/.test(String(r[h]||"").trim()) ? 1:0 ), 0);
-    if(s>score){score=s;best=h;}
-  });
-  return best || headers.find(h=>h!==exclude) || headers[0];
-}
-
 function toCsv(headers, rows){
   const esc = v=>{
     const s = v==null ? "" : String(v);
@@ -97,62 +88,126 @@ function toCsv(headers, rows){
   return [headers.join(','), ...rows.map(r=>headers.map(h=>esc(r[h])).join(','))].join('\n');
 }
 
+// ---- mapping load + manual pickers
+let mappingRows = [];
+let mappingHeaders = [];
+let mappingDict = {};
+
+$('mapping').addEventListener('change', async ()=>{
+  mappingRows = [];
+  mappingHeaders = [];
+  mappingDict = {};
+  $('mapStoreCol').innerHTML = '';
+  $('mapIdCol').innerHTML = '';
+  $('mapPreview').textContent = '';
+
+  const file = $('mapping').files[0];
+  if(!file) return;
+
+  try {
+    if(file.name.toLowerCase().endsWith('.csv')){
+      const text = await readFileAsText(file);
+      const parsed = Papa.parse(text, { header:true, skipEmptyLines:true });
+      mappingRows = parsed.data;
+      mappingHeaders = parsed.meta.fields || Object.keys(mappingRows[0]||{});
+    } else {
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type:'array' });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      mappingRows = XLSX.utils.sheet_to_json(sheet, { defval:"" });
+      mappingHeaders = Object.keys(mappingRows[0]||{});
+    }
+
+    // populate dropdowns
+    for (const h of mappingHeaders) {
+      const o1 = document.createElement('option'); o1.value=o1.textContent=h; $('mapStoreCol').appendChild(o1);
+      const o2 = document.createElement('option'); o2.value=o2.textContent=h; $('mapIdCol').appendChild(o2);
+    }
+
+    // try sensible defaults
+    const pick = (sel, regexArr, fallbackIdx=0)=>{
+      const options = Array.from(sel.options).map(o=>o.value);
+      for(const re of regexArr){
+        const f = options.find(h=>re.test(h));
+        if(f){ sel.value = f; return; }
+      }
+      sel.selectedIndex = Math.min(fallbackIdx, options.length-1);
+    };
+    pick($('mapStoreCol'), [/store\s*code.*sap/i, /^store.*code$/i, /^store/i], 0);
+    pick($('mapIdCol'), [/careem\s*id/i, /crm/i], 0);
+
+    $('mapPreview').textContent = `Loaded ${mappingRows.length} rows. Choose the correct columns above (Careem IDs are usually 6–8 digits).`;
+  } catch(e){
+    console.error(e);
+    alert('Failed to read mapping file. See console.');
+  }
+});
+
+// ---- main action
 $('runBtn').onclick = async ()=>{
   try{
     const master = $('master').files[0];
-    if(!master) { alert('Please choose the master CSV'); return; }
-    const mappingFile = $('mapping').files[0];
-    const storeCol = $('storeCol').value.trim();
-    const pattern = $('pattern').value;
+    if(!master){ alert('Please choose the master CSV'); return; }
 
-    log('Reading files…');
-    const [text, mapping] = await Promise.all([
-      readFileAsText(master),
-      parseMapping(mappingFile)
-    ]);
+    const storeField = $('storeCol').value.trim();
+    if(!storeField){ alert('Enter the store column name from your master CSV'); return; }
 
-    const parsed = Papa.parse(text, { header:true, skipEmptyLines:true });
-    if(parsed.errors?.length){
-      console.warn(parsed.errors);
+    // build mapping dict if provided
+    mappingDict = {};
+    if (mappingRows.length && $('mapStoreCol').value && $('mapIdCol').value){
+      const codeCol = $('mapStoreCol').value;
+      const idCol = $('mapIdCol').value;
+      mappingRows.forEach(r=>{
+        const code = String(r[codeCol]??"").trim().toUpperCase();
+        const cid  = String(r[idCol]??"").trim();
+        // accept only A### codes and 5–9 digit IDs (protect from 12–14 digit barcodes)
+        if(/^[A-Z]\d{3}$/.test(code) && /^\d{5,9}$/.test(cid)){
+          mappingDict[code] = cid;
+        }
+      });
     }
-    const rows = parsed.data;
-    if(!rows.length) { alert('Master CSV is empty'); return; }
 
-    // Group rows by store code
-    const storeField = storeCol || 'Store_No';
+    log('Reading master CSV…');
+    const text = await readFileAsText(master);
+    const parsed = Papa.parse(text, { header:true, skipEmptyLines:true });
+    if(parsed.errors?.length){ console.warn(parsed.errors); }
+
+    const rows = parsed.data;
+    if(!rows.length){ alert('Master CSV appears empty'); return; }
+
+    const headers = parsed.meta.fields || Object.keys(rows[0]||{});
+
+    // group by store
     const groups = {};
     rows.forEach(r=>{
-      const code = String(r[storeField] ?? "").trim().toUpperCase();
+      const code = String(r[storeField] ?? '').trim().toUpperCase();
       if(!code) return;
       (groups[code] ||= []).push(r);
     });
 
-    // Prepare ZIP
+    // build zip
     const zip = new JSZip();
-    const headers = parsed.meta.fields || Object.keys(rows[0]||{});
-
     let files = 0, renamed = 0;
+    const pattern = $('pattern').value;
+
     for(const [code, rowsForStore] of Object.entries(groups)){
-      let filename;
-      if(pattern==='careem' && mapping[code]){
-        filename = `${mapping[code]}.csv`; renamed++;
-      } else {
-        filename = `${code}.csv`;
+      let filename = `${code}.csv`;
+      if(pattern === 'careem' && mappingDict[code]){
+        filename = `${mappingDict[code]}.csv`;
+        renamed++;
       }
-      const csv = toCsv(headers, rowsForStore);
-      zip.file(filename, csv);
+      zip.file(filename, toCsv(headers, rowsForStore));
       files++;
     }
 
     const blob = await zip.generateAsync({ type:'blob' });
     saveAs(blob, 'split_stores.zip');
-    log(`Done. Files: ${files} (renamed by mapping: ${renamed}).`);
+    log(`Done. Files: ${files}. Renamed by mapping: ${renamed}. Unmatched kept with store code names.`);
   }catch(err){
     console.error(err);
-    alert('Something went wrong. Check console.');
+    alert('Something went wrong. Open DevTools (F12) → Console for details.');
   }
 };
 </script>
 </body>
 </html>
-
