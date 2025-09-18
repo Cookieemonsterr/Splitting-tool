@@ -68,36 +68,7 @@ async function readFileAsText(file){
   });
 }
 
-async function parseMapping(file){
-  if(!file) return {};
-  const name = file.name.toLowerCase();
-  // CSV mapping
-  if(name.endsWith('.csv')){
-    const text = await readFileAsText(file);
-    const { data, meta } = Papa.parse(text, { header:true, skipEmptyLines:true });
-    return buildMappingFromRows(data);
-  }
-  // Excel mapping
-  const buf = await file.arrayBuffer();
-  const wb = XLSX.read(buf, { type: 'array' });
-  const sheetName = wb.SheetNames[0];
-  const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval:"" });
-  return buildMappingFromRows(rows);
-}
-
-function buildMappingFromRows(rows){
-  if(!rows || !rows.length) return {};
-  const headers = Object.keys(rows[0]);
-  const codeCol = guessStoreCodeCol(headers, rows);
-  const idCol   = guessIdCol(headers, rows, codeCol);
-  const map = {};
-  rows.forEach(r=>{
-    const code = String((r[codeCol]||"")).trim().toUpperCase();
-    const id   = String((r[idCol]||"")).trim();
-    if(/^[A-Z]\d{3}$/.test(code) && /^\d+$/.test(id)) map[code]=id;
-  });
-  return map;
-}
+parseMapping
 
 function guessStoreCodeCol(headers, rows){
   let best=null, score=-1;
@@ -184,3 +155,4 @@ $('runBtn').onclick = async ()=>{
 </script>
 </body>
 </html>
+
