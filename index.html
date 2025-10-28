@@ -29,8 +29,8 @@
   <div class="card">
     <div class="row">
       <div style="flex:1 1 360px">
-        <label>Master CSV</label>
-        <input id="master" type="file" accept=".csv" />
+        <label>Master CSV (you can select multiple)</label>
+        <input id="master" type="file" accept=".csv" multiple />
         <div class="muted">Must include a store column (default <code>Store_No</code>).</div>
         <label style="margin-top:10px">Store column name in master CSV</label>
         <input id="storeCol" type="text" value="Store_No" />
@@ -146,8 +146,8 @@ $('mapping').addEventListener('change', async ()=>{
 // ---- main action
 $('runBtn').onclick = async ()=>{
   try{
-    const master = $('master').files[0];
-    if(!master){ alert('Please choose the master CSV'); return; }
+    const masterFiles = Array.from($('master').files || []);
+    if(!masterFiles.length){ alert('Please choose the master CSV (you can select multiple)'); return; }
 
     const storeField = $('storeCol').value.trim();
     if(!storeField){ alert('Enter the store column name from your master CSV'); return; }
@@ -167,19 +167,51 @@ $('runBtn').onclick = async ()=>{
       });
     }
 
-    log('Reading master CSV…');
-    const text = await readFileAsText(master);
-    const parsed = Papa.parse(text, { header:true, skipEmptyLines:true });
-    if(parsed.errors?.length){ console.warn(parsed.errors); }
+    log('Reading master CSV(s)…');
 
-    const rows = parsed.data;
-    if(!rows.length){ alert('Master CSV appears empty'); return; }
+    // collect rows from ALL master CSV files
+    let allRows = [];
+    let headers = null;
 
-    const headers = parsed.meta.fields || Object.keys(rows[0]||{});
+    for (const file of masterFiles){
+      const text = await readFileAsText(file);
+      const parsed = Papa.parse(text, { header:true, skipEmptyLines:true });
+      if(parsed.errors?.length){ console.warn('Parse errors in', file.name, parsed.errors); }
 
-    // group by store
+      const rows = parsed.data || [];
+      if(!rows.length){
+        console.warn('File appears empty:', file.name);
+        continue;
+      }
+
+      const fileHeaders = parsed.meta.fields || Object.keys(rows[0]||{});
+
+      // first file defines headers
+      if(!headers){
+        headers = fileHeaders;
+      } else {
+        // sanity check: make sure headers line up
+        // if different, we'll merge by union so we don't crash
+        const headerSet = new Set(headers);
+        for(const h of fileHeaders){
+          if(!headerSet.has(h)){
+            headers.push(h); // add any new column from later files
+            headerSet.add(h);
+          }
+        }
+      }
+
+      allRows = allRows.concat(rows);
+    }
+
+    if(!allRows.length){
+      alert('No rows found in the selected master CSV files');
+      return;
+    }
+
+    // group by store across ALL rows
     const groups = {};
-    rows.forEach(r=>{
+    allRows.forEach(r=>{
       const code = String(r[storeField] ?? '').trim().toUpperCase();
       if(!code) return;
       (groups[code] ||= []).push(r);
